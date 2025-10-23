@@ -112,16 +112,44 @@ if uploaded:
         st.subheader("QC Measurements (Wells 11 & 12) — in run order")
         st.dataframe(qc_view, use_container_width=True)
 
-        # ---- Plot ----
+        # ---- Metrics: average % deviation per standard ----
+        st.subheader("QC Metrics")
+        metrics = (qc_view
+                   .groupby("Expected")["Pct_Deviation"]
+                   .agg(["mean", "count"])
+                   .reset_index()
+                   .sort_values("Expected"))
+        col_metrics = st.columns(len(metrics))
+        for i, row in metrics.iterrows():
+            with col_metrics[i]:
+                st.metric(label=f"{row['Expected']} mmol/L — mean % dev (n={int(row['count'])})",
+                          value=f"{row['mean']:.2f}%")
+
+        # ---- Plot controls ----
         st.subheader("QC % Deviation over Run")
+        default_range = (-12.0, 12.0)
+        y_min, y_max = st.slider("Y-axis range (% deviation)",
+                                 min_value=-50.0, max_value=50.0,
+                                 value=default_range, step=0.5)
+
+        # ---- Plot ----
         fig, ax = plt.subplots()
         for exp in sorted(expected_vals):
             subset = qc_view[np.isclose(qc_view["Expected"], exp)]
             if not subset.empty:
                 ax.plot(subset["RunOrder"], subset["Pct_Deviation"], marker="o", label=f"{exp} mmol/L")
+
+        # Baseline and spec lines
+        ax.axhline(0, linestyle="--")           # centerline (0%)
+        ax.axhline(2, linestyle=":")            # USL1 +2%
+        ax.axhline(5, linestyle=":")            # USL2 +5%
+        ax.axhline(-2, linestyle=":")           # LSL1 -2%
+        ax.axhline(-5, linestyle=":")           # LSL2 -5%
+
         ax.set_xlabel("Run order")
         ax.set_ylabel("% deviation from expected")
         ax.set_title("QC deviation over run")
+        ax.set_ylim([y_min, y_max])
         ax.legend()
         st.pyplot(fig)
 
