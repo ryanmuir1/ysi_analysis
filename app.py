@@ -1,12 +1,12 @@
 
 import io
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Plate Analyzer (Samples + QC)", layout="wide")
-
 st.title("Plate Analyzer — Samples & QC")
 
 uploaded = st.file_uploader("Upload the BioAnalysis CSV", type=["csv"])
@@ -23,29 +23,49 @@ def read_csv_flex(f):
     # last resort
     return pd.read_csv(f, sep=None, engine="python", encoding_errors="replace"), "auto-sep, replace-errors"
 
-def parse_df(df):
+def parse_row_col(well_id: str):
+    """
+    Handles formats like 'A1', 'A01', 'H12' and 'P96_A01' (ignore the 'P96_' prefix).
+    Returns (Row, Col) or (np.nan, np.nan) if unparsable.
+    """
+    if not isinstance(well_id, str) or not well_id:
+        return np.nan, np.nan
+    token = well_id
+    if "_" in token:
+        token = token.split("_")[-1]  # take the last segment after underscore
+    m = re.match(r'^\s*([A-Za-z])\s*0*?(\d+)\s*$', token)
+    if not m:
+        # fallback: letter + digits anywhere
+        m = re.search(r'([A-Za-z])\s*0*?(\d+)', token)
+    if m:
+        row = m.group(1).upper()
+        try:
+            col = int(m.group(2))
+        except Exception:
+            col = np.nan
+        return row, col
+    return np.nan, np.nan
+
+def prepare_df(df):
     df = df.copy()
-    # normalize columns
     df.columns = [c.strip() for c in df.columns]
-    # required
-    req = ["Well Id", "Probe Id", "Concentration"]
-    missing = [c for c in req if c not in df.columns]
+    required = ["Well Id", "Probe Id", "Concentration"]
+    missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"Missing required columns: {missing}")
         return None
-    # derive row & col
-    df["Row"] = df["Well Id"].astype(str).str[0].str.upper()
-    df["Col"] = (
-        df["Well Id"].astype(str).str.extract(r'(\d+)$')[0].astype(float)
-    )
-    # coerce concentration
+
+    # Derive Row/Col correctly
+    parsed = df["Well Id"].apply(parse_row_col).apply(pd.Series)
+    parsed.columns = ["Row", "Col"]
+    df = pd.concat([df, parsed], axis=1)
     df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
     return df
 
 if uploaded:
     df, enc = read_csv_flex(uploaded)
     st.caption(f"Detected encoding: **{enc}** — rows: {df.shape[0]}, cols: {df.shape[1]}")
-    df = parse_df(df)
+    df = prepare_df(df)
     if df is not None:
         # ---- Samples (wells 1–9), averaged over probes ----
         samples = df[df["Col"].between(1, 9, inclusive="both")].copy()
