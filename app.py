@@ -1,128 +1,122 @@
+
 import io
-import csv
-import re
-from typing import List, Dict
+import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Well Averages", layout="wide")
+st.set_page_config(page_title="Plate Analyzer (Samples + QC)", layout="wide")
 
-st.title("Well Glucose Averager")
-st.caption("Upload your exported text/CSV file(s). Each row must look like: "
-           "`8/27/2025,10:08,AX173-A01,1A,Glucose,2.93,mmol/L,1B,Glucose,2.87,mmol/L,1.0`")
+st.title("Plate Analyzer — Samples & QC")
 
-uploaded_files = st.file_uploader(
-    "Drop one or more files here (txt or csv).",
-    type=["txt", "csv"],
-    accept_multiple_files=True,
-    help="Each line must contain batch-well like AX173-A01 and two glucose values for 1A and 1B."
-)
+uploaded = st.file_uploader("Upload the BioAnalysis CSV", type=["csv"])
 
-def parse_lines(text: str) -> List[Dict]:
-    records: List[Dict] = []
-    reader = csv.reader(io.StringIO(text))
-    for row in reader:
-        if not row:
-            continue
-        # Be forgiving about stray spaces
-        row = [cell.strip() for cell in row]
-        # Extract batch and well from the 3rd column like "AX173-A01"
-        bw = row[2] if len(row) > 2 else ""
-        if "-" in bw:
-            batch_id, well_id = bw.split("-", 1)
-        else:
-            m = re.search(r"([A-Za-z0-9]+)-([A-H]\d{2})", ",".join(row))
-            if not m:
-                continue
-            batch_id, well_id = m.group(1), m.group(2)
-
-        # Find the two glucose numeric values.
-        def parse_float_safe(x):
-            try:
-                return float(x)
-            except Exception:
-                return None
-
-        v1 = parse_float_safe(row[5] if len(row) > 5 else None)
-        v2 = parse_float_safe(row[9] if len(row) > 9 else None)
-
-        if v1 is None or v2 is None:
-            nums = []
-            for i, token in enumerate(row):
-                if token.lower() == "glucose" and i+1 < len(row):
-                    f = parse_float_safe(row[i+1])
-                    if f is not None:
-                        nums.append(f)
-            if len(nums) >= 2:
-                v1, v2 = nums[0], nums[1]
-            else:
-                floats = [parse_float_safe(t) for t in row]
-                floats = [f for f in floats if f is not None]
-                if len(floats) >= 2:
-                    v1, v2 = floats[0], floats[1]
-                else:
-                    continue
-
-        avg = (v1 + v2) / 2.0
-
-        row_letter = well_id[0] if well_id else ""
+def read_csv_flex(f):
+    # try several encodings
+    for enc in ["utf-8-sig", "latin1", "cp1252", "utf-16"]:
         try:
-            col_num = int(well_id[1:])
+            return pd.read_csv(f, encoding=enc), enc
         except Exception:
-            col_num = None
+            f.seek(0)
+            continue
+    f.seek(0)
+    # last resort
+    return pd.read_csv(f, sep=None, engine="python", encoding_errors="replace"), "auto-sep, replace-errors"
 
-        records.append({
-            "batchID": batch_id,
-            "wellID": well_id,
-            "row": row_letter,
-            "col": col_num,
-            "avg_concentration_mmol_L": avg
-        })
-    return records
+def parse_df(df):
+    df = df.copy()
+    # normalize columns
+    df.columns = [c.strip() for c in df.columns]
+    # required
+    req = ["Well Id", "Probe Id", "Concentration"]
+    missing = [c for c in req if c not in df.columns]
+    if missing:
+        st.error(f"Missing required columns: {missing}")
+        return None
+    # derive row & col
+    df["Row"] = df["Well Id"].astype(str).str[0].str.upper()
+    df["Col"] = (
+        df["Well Id"].astype(str).str.extract(r'(\d+)$')[0].astype(float)
+    )
+    # coerce concentration
+    df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
+    return df
 
-all_records: List[Dict] = []
+if uploaded:
+    df, enc = read_csv_flex(uploaded)
+    st.caption(f"Detected encoding: **{enc}** — rows: {df.shape[0]}, cols: {df.shape[1]}")
+    df = parse_df(df)
+    if df is not None:
+        # ---- Samples (wells 1–9), averaged over probes ----
+        samples = df[df["Col"].between(1, 9, inclusive="both")].copy()
+        avg_samples = (
+            samples.groupby(["Row", "Col"], as_index=False)
+            .agg(Avg_Concentration=("Concentration", "mean"),
+                 N_Measurements=("Concentration", "count"))
+            .sort_values("Avg_Concentration", ascending=True)
+            .reset_index(drop=True)
+        )
+        st.subheader("Averaged Samples (Wells 1–9) — sorted ascending by Avg_Concentration")
+        st.dataframe(avg_samples, use_container_width=True)
 
-if uploaded_files:
-    for uf in uploaded_files:
-        content = uf.read().decode("utf-8", errors="ignore")
-        recs = parse_lines(content)
-        all_records.extend(recs)
+        # ---- QC (wells 11 & 12), per-probe, in run order ----
+        qc = df[df["Col"].isin([11, 12])].copy()
 
-sample_text = st.text_area(
-    "Or paste raw lines here (optional):",
-    value="",
-    height=150,
-    placeholder="Paste lines like: 8/27/2025,10:08,AX173-A01,1A,Glucose,2.93,mmol/L,1B,Glucose,2.87,mmol/L,1.0"
-)
+        # order by time if available
+        if "Local Completion Time" in qc.columns:
+            try:
+                qc["_time"] = pd.to_datetime(qc["Local Completion Time"])
+            except Exception:
+                qc["_time"] = pd.NaT
+        else:
+            qc["_time"] = pd.NaT
 
-if sample_text.strip():
-    all_records.extend(parse_lines(sample_text))
+        if qc["_time"].isna().all():
+            qc["RunOrder"] = np.arange(1, len(qc) + 1)
+        else:
+            qc = qc.sort_values("_time").reset_index(drop=True)
+            qc["RunOrder"] = np.arange(1, len(qc) + 1)
 
-if not all_records:
-    st.info("Upload a file or paste lines above to see results.")
-    st.stop()
+        expected_vals = np.array([2.8, 11.1, 22.2], dtype=float)
+        def closest_expected(x):
+            if pd.isna(x):
+                return np.nan
+            idx = np.abs(expected_vals - x).argmin()
+            return float(expected_vals[idx])
 
-df = pd.DataFrame(all_records)
+        qc["Expected"] = qc["Concentration"].apply(closest_expected)
+        qc["Pct_Deviation"] = (qc["Concentration"] - qc["Expected"]) / qc["Expected"] * 100.0
 
-# Sort by row (A..H), then by ascending avg concentration, then by column number.
-df.sort_values(by=["row", "avg_concentration_mmol_L", "col"], ascending=[True, True, True], inplace=True)
+        qc_view = qc[["RunOrder", "Local Completion Time", "Row", "Col", "Well Id", "Probe Id", "Concentration", "Expected", "Pct_Deviation"]].copy()
 
-# Format output
-out = df[["batchID", "wellID", "avg_concentration_mmol_L"]].rename(
-    columns={"avg_concentration_mmol_L": "average concentration (mmol/L)"}
-)
-out.reset_index(drop=True, inplace=True)
+        st.subheader("QC Measurements (Wells 11 & 12) — in run order")
+        st.dataframe(qc_view, use_container_width=True)
 
-st.subheader("Averaged Results (sorted by row, then ascending concentration)")
-st.dataframe(out, use_container_width=True)
+        # ---- Plot ----
+        st.subheader("QC % Deviation over Run")
+        fig, ax = plt.subplots()
+        for exp in sorted(expected_vals):
+            subset = qc_view[np.isclose(qc_view["Expected"], exp)]
+            if not subset.empty:
+                ax.plot(subset["RunOrder"], subset["Pct_Deviation"], marker="o", label=f"{exp} mmol/L")
+        ax.set_xlabel("Run order")
+        ax.set_ylabel("% deviation from expected")
+        ax.set_title("QC deviation over run")
+        ax.legend()
+        st.pyplot(fig)
 
-# Row filter
-with st.expander("Filter by row letter"):
-    rows = sorted(df["row"].dropna().unique().tolist())
-    selected = st.multiselect("Rows", rows, default=rows)
-    filtered = out[out["wellID"].str[0].isin(selected)] if selected else out
-    st.dataframe(filtered, use_container_width=True)
-
-# Download
-csv_bytes = out.to_csv(index=False).encode("utf-8")
-st.download_button("Download CSV", data=csv_bytes, file_name="well_averages.csv", mime="text/csv")
+        # Downloads
+        st.download_button(
+            "Download averaged samples CSV",
+            data=avg_samples.to_csv(index=False).encode("utf-8"),
+            file_name="averaged_samples_by_well.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "Download QC table CSV",
+            data=qc_view.to_csv(index=False).encode("utf-8"),
+            file_name="qc_measurements_with_deviation.csv",
+            mime="text/csv",
+        )
+else:
+    st.info("Upload a CSV to begin.")
