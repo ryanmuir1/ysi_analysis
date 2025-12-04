@@ -1,0 +1,25 @@
+name: Recipe 1 - Probe 1A Inactive
+
+sample_columns:
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+
+qc_columns:
+  - 1
+  - 3
+
+qc_expected_concentrations:
+  - 2.8
+  - 27.6
+
+active_probes:
+  # probe IDs exactly as they appear in the CSV column "Probe Id"
+  - "1B"
+  # 1A intentionally missing because it is non-functional
