@@ -23,3 +23,14 @@ active_probes:
   # probe IDs exactly as they appear in the CSV column "Probe Id"
   - "1B"
   # 1A intentionally missing because it is non-functional
+
+row_to_beaker:
+  A: Beaker 1
+  B: Beaker 2
+  C: Beaker 3
+  D: Beaker 4
+  E: Beaker 5
+  F: Beaker 6
+  G: Beaker 7
+  H: Beaker 8
+
