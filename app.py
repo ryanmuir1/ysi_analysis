@@ -40,7 +40,14 @@ recipe = recipes[recipe_name]
 
 
 # ------------------------------------------------------------
-# Utility functions
+# Session state for 2-step package download
+# ------------------------------------------------------------
+if "awaiting_code" not in st.session_state:
+    st.session_state.awaiting_code = False
+
+
+# ------------------------------------------------------------
+# CSV utilities
 # ------------------------------------------------------------
 def read_csv_flex(f):
     for enc in ["utf-8-sig", "latin1", "cp1252", "utf-16"]:
@@ -86,16 +93,15 @@ def prepare_df(df, active_probes):
     parsed = df["Well Id"].apply(parse_row_col).apply(pd.Series)
     parsed.columns = ["Row", "Col"]
     df = pd.concat([df, parsed], axis=1)
-    df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
 
+    df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
     return df
 
 
 # ------------------------------------------------------------
-# Main
+# File upload
 # ------------------------------------------------------------
 uploaded = st.file_uploader("Upload BioAnalysis CSV", type=["csv"])
-
 if not uploaded:
     st.info("Upload a CSV to begin.")
     st.stop()
@@ -111,46 +117,19 @@ sample_cols = recipe["sample_columns"]
 qc_cols = recipe["qc_columns"]
 expected_vals = np.array(recipe["qc_expected_concentrations"], dtype=float)
 
-
-# ------------------------------------------------------------
-# Samples
-# ------------------------------------------------------------
-samples = df[df["Col"].isin(sample_cols)].copy()
-
-if samples.empty:
-    avg_samples = pd.DataFrame()
-    st.info("No sample rows found for configured sample columns.")
-else:
-    avg_samples = (
-        samples.groupby(["Row", "Col"], as_index=False)
-        .agg(
-            Avg_Concentration=("Concentration", "mean"),
-            N_Measurements=("Concentration", "count")
-        )
-    )
-
-    # Map row → beaker
-    avg_samples["Beaker"] = avg_samples["Row"].map(recipe["row_to_beaker"])
-
-    # Sort properly by row, then col
-    row_order = {chr(ord("A") + i): i for i in range(26)}
-    avg_samples["RowIndex"] = avg_samples["Row"].map(row_order)
-    avg_samples = avg_samples.sort_values(["RowIndex", "Col"]).reset_index(drop=True)
-    avg_samples = avg_samples.drop(columns=["RowIndex"])
-
-st.subheader(f"Averaged Samples (Columns {sample_cols})")
-st.dataframe(avg_samples, use_container_width=True)
+# Make fig available globally
+fig = None
 
 
 # ------------------------------------------------------------
-# QC
+# QC analysis early to compute plate pass/fail
 # ------------------------------------------------------------
-qc_view = pd.DataFrame()
 qc = df[df["Col"].isin(qc_cols)].copy()
+qc_view = pd.DataFrame()
+plate_fail = False
 
-if qc.empty:
-    st.info("No QC rows for configured QC columns.")
-else:
+if not qc.empty:
+
     if "Local Completion Time" in qc.columns:
         try:
             qc["_time"] = pd.to_datetime(qc["Local Completion Time"])
@@ -179,17 +158,12 @@ else:
         "Probe Id", "Concentration", "Expected", "Pct_Deviation"
     ]]
 
-    st.subheader(f"QC Measurements (Columns {qc_cols})")
-    st.dataframe(qc_view, use_container_width=True)
-
-
-# ------------------------------------------------------------
-# PASS / FAIL banner
-# ------------------------------------------------------------
-plate_fail = False
-if not qc_view.empty:
     plate_fail = (qc_view["Pct_Deviation"].abs() > 5).any()
 
+
+# ------------------------------------------------------------
+# TOP-OF-PAGE PASS/FAIL BANNER
+# ------------------------------------------------------------
 if plate_fail:
     st.error("PLATE AT RISK — at least one QC point outside ±5 percent.")
 else:
@@ -197,7 +171,82 @@ else:
 
 
 # ------------------------------------------------------------
-# QC plot
+# TOP-OF-PAGE PACKAGE DOWNLOAD SECTION
+# ------------------------------------------------------------
+st.subheader("Download Package")
+
+if st.button("Prepare Package"):
+    st.session_state.awaiting_code = True
+
+if st.session_state.awaiting_code:
+    code = st.text_input("Enter 3-digit code", max_chars=3)
+
+    if code and code.isdigit() and len(code) == 3:
+
+        prefix = f"LN-AX00{code}"
+        status = "FAIL" if plate_fail else "PASS"
+
+        mem_zip = BytesIO()
+        with zipfile.ZipFile(mem_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+
+            # 1. Raw file
+            raw_name = f"{prefix}_Raw_{status}.csv"
+            z.writestr(raw_name, df.to_csv(index=False))
+
+            # 2. Averaged samples added later after sample calc
+
+            # 3. QC table
+            qc_name = f"{prefix}_QC_{status}.csv"
+            z.writestr(qc_name, qc_view.to_csv(index=False))
+
+            # 4. Plot (added later once built)
+
+        mem_zip.seek(0)
+        st.session_state.generated_zip = mem_zip.getvalue()
+
+        # ZIP will be updated later once samples + plot exist
+    elif code:
+        st.error("Code must be exactly 3 digits.")
+
+
+# ------------------------------------------------------------
+# SAMPLE PROCESSING
+# ------------------------------------------------------------
+samples = df[df["Col"].isin(sample_cols)].copy()
+
+if samples.empty:
+    avg_samples = pd.DataFrame()
+    st.info("No sample rows found for configured sample columns.")
+else:
+    avg_samples = (
+        samples.groupby(["Row", "Col"], as_index=False)
+        .agg(
+            Avg_Concentration=("Concentration", "mean"),
+            N_Measurements=("Concentration", "count")
+        )
+    )
+
+    avg_samples["Beaker"] = avg_samples["Row"].map(recipe["row_to_beaker"])
+
+    row_order = {chr(ord("A") + i): i for i in range(26)}
+    avg_samples["RowIndex"] = avg_samples["Row"].map(row_order)
+    avg_samples = avg_samples.sort_values(["RowIndex", "Col"]).reset_index(drop=True)
+    avg_samples = avg_samples.drop(columns=["RowIndex"])
+
+st.subheader(f"Averaged Samples (Columns {sample_cols})")
+st.dataframe(avg_samples, use_container_width=True)
+
+
+# ------------------------------------------------------------
+# QC VIEW DISPLAY
+# ------------------------------------------------------------
+if not qc_view.empty:
+    st.subheader(f"QC Measurements (Columns {qc_cols})")
+    st.dataframe(qc_view, use_container_width=True)
+
+
+# ------------------------------------------------------------
+# QC PLOT
 # ------------------------------------------------------------
 st.subheader("QC % Deviation Over Run")
 
@@ -209,7 +258,6 @@ y_min, y_max = st.slider(
     step=0.5
 )
 
-fig = None
 if not qc_view.empty:
     fig, ax = plt.subplots()
     for exp in sorted(np.unique(qc_view["Expected"].dropna())):
@@ -227,56 +275,45 @@ if not qc_view.empty:
     ax.set_ylabel("% deviation")
     ax.set_ylim([y_min, y_max])
     ax.legend()
-
     st.pyplot(fig)
 
 
 # ------------------------------------------------------------
-# Package download
+# FINAL ZIP DOWNLOAD (once samples & plot exist)
 # ------------------------------------------------------------
-st.subheader("Download Package")
+if st.session_state.awaiting_code and "generated_zip" in st.session_state:
+    code = st.session_state.get("last_code", None)
+    # ZIP exists from earlier step
+    zip_data = BytesIO(st.session_state.generated_zip)
 
-pkg_trigger = st.button("Download Package")
+    # Now rebuild ZIP with samples + plot included
+    prefix = "LN-AX00" + (st.text_input("Code (already entered)", max_chars=3) or "???")
+    status = "FAIL" if plate_fail else "PASS"
 
-if pkg_trigger:
-    code = st.text_input("Enter 3-digit code (e.g. 123):", max_chars=3)
-    if code and len(code) == 3 and code.isdigit():
+    mem_zip = BytesIO()
+    with zipfile.ZipFile(mem_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
 
-        prefix = f"LN-AX00{code}"
-        status = "FAIL" if plate_fail else "PASS"
+        # Raw file
+        z.writestr(f"{prefix}_Raw_{status}.csv", df.to_csv(index=False))
 
-        mem_zip = BytesIO()
-        with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+        # Processed samples
+        z.writestr(f"{prefix}_Processed_{status}.csv", avg_samples.to_csv(index=False))
 
-            # 1. Raw file
-            raw_name = f"{prefix}_Raw_{status}.csv"
-            z.writestr(raw_name, df.to_csv(index=False))
+        # QC table
+        z.writestr(f"{prefix}_QC_{status}.csv", qc_view.to_csv(index=False))
 
-            # 2. Processed samples
-            samp_name = f"{prefix}_Processed_{status}.csv"
-            z.writestr(samp_name, avg_samples.to_csv(index=False))
+        # QC plot
+        if fig is not None:
+            buf = BytesIO()
+            fig.savefig(buf, format="png")
+            buf.seek(0)
+            z.writestr(f"{prefix}_QCplot_{status}.png", buf.read())
 
-            # 3. QC table
-            qc_name = f"{prefix}_QC_{status}.csv"
-            z.writestr(qc_name, qc_view.to_csv(index=False))
+    mem_zip.seek(0)
 
-            # 4. QC Plot PNG
-            plot_name = f"{prefix}_QCplot_{status}.png"
-            if fig is not None:
-                buf = BytesIO()
-                fig.savefig(buf, format="png")
-                buf.seek(0)
-                z.writestr(plot_name, buf.read())
-
-        mem_zip.seek(0)
-        st.download_button(
-            "Download ZIP Package",
-            data=mem_zip.getvalue(),
-            file_name=f"{prefix}_PACK_{status}.zip",
-            mime="application/zip"
-        )
-
-    elif code:
-        st.error("Code must be exactly 3 digits.")
-
-
+    st.download_button(
+        "Download ZIP Package",
+        data=mem_zip.getvalue(),
+        file_name=f"{prefix}_PACK_{status}.zip",
+        mime="application/zip"
+    )
