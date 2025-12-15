@@ -13,6 +13,7 @@ sample_columns:
   - 10
 
 qc_columns:
+  - 10
   - 11
   - 12
 
