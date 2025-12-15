@@ -98,29 +98,29 @@ def build_qc_figure(qc_view):
     plot_df = qc_view.copy()
     plot_df["BeakerIndex"] = plot_df["Row"].map(row_order)
 
-    # Aggregate to one point per Beaker per Expected concentration
     fig, ax = plt.subplots()
 
     unique_exp = sorted(plot_df["Expected"].dropna().unique())
     all_beakers = sorted(plot_df["BeakerIndex"].dropna().unique())
 
     for exp in unique_exp:
-        sub = plot_df[np.isclose(plot_df["Expected"], exp)]
+        sub = plot_df[np.isclose(plot_df["Expected"], exp)].copy()
         if sub.empty:
             continue
-        agg = (
-            sub.groupby("BeakerIndex", as_index=False)
-            .agg(Pct_Deviation=("Pct_Deviation", "mean"))
-        )
+
+        # preserve run order so lines make sense
+        sub = sub.sort_values("RunOrder")
+
         ax.plot(
-            agg["BeakerIndex"],
-            agg["Pct_Deviation"],
+            sub["BeakerIndex"],
+            sub["Pct_Deviation"],
             marker="o",
+            linestyle="-",
             label=f"{exp} mmol/L"
         )
 
-        # Label each point with % deviation
-        for _, r in agg.iterrows():
+        # label every QC measurement (no averaging)
+        for _, r in sub.iterrows():
             ax.annotate(
                 f"{r['Pct_Deviation']:.1f}%",
                 (r["BeakerIndex"], r["Pct_Deviation"]),
@@ -134,45 +134,37 @@ def build_qc_figure(qc_view):
     ax.set_xticks(all_beakers)
     ax.set_xticklabels([f"Beaker {int(b)}" for b in all_beakers])
 
-    # Horizontal spec lines
-    ax.axhline(0, linestyle="--")   # centerline
-    ax.axhline(2, linestyle=":")    # +2 %
-    ax.axhline(5, linestyle=":")    # +5 %
-    ax.axhline(-2, linestyle=":")   # -2 %
-    ax.axhline(-5, linestyle=":")   # -5 %
+    # Spec lines
+    ax.axhline(0, linestyle="--")
+    ax.axhline(2, linestyle=":")
+    ax.axhline(5, linestyle=":")
+    ax.axhline(-2, linestyle=":")
+    ax.axhline(-5, linestyle=":")
 
     ax.set_xlabel("Beaker")
     ax.set_ylabel("% deviation")
     ax.set_title("QC % deviation by beaker")
-
-    # Reasonable fixed y-range
     ax.set_ylim(-12, 12)
 
-    # Summary box: mean / stdev per expected concentration
+    # Summary box (still uses all raw QC points)
     metrics = (
         qc_view.groupby("Expected")["Pct_Deviation"]
         .agg(["mean", "std", "count"])
         .reset_index()
         .sort_values("Expected")
     )
+
     summary_lines = []
     for _, row in metrics.iterrows():
-        exp = row["Expected"]
-        mean_dev = row["mean"]
-        std_dev = row["std"]
-        n = int(row["count"])
-        if np.isnan(std_dev):
-            std_str = "N/A"
-        else:
-            std_str = f"{std_dev:.2f}%"
+        std_str = "N/A" if pd.isna(row["std"]) else f"{row['std']:.2f}%"
         summary_lines.append(
-            f"{exp:.1f} mmol/L: mean {mean_dev:.2f}%, sd {std_str} (n={n})"
+            f"{row['Expected']:.1f} mmol/L: mean {row['mean']:.2f}%, sd {std_str} (n={int(row['count'])})"
         )
-    summary_text = "\n".join(summary_lines)
+
     ax.text(
         0.02,
         0.98,
-        summary_text,
+        "\n".join(summary_lines),
         transform=ax.transAxes,
         va="top",
         ha="left",
@@ -183,6 +175,7 @@ def build_qc_figure(qc_view):
     ax.legend()
     fig.tight_layout()
     return fig
+
 
 
 # ------------------------------------------------------------
